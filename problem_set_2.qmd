@@ -1,14 +1,20 @@
 ---
 title: "Problem Set 2"
 format: 
-    html: 
+    pdf: 
         embed-resources: true
+        include-in-header:
+            text: |
+                \usepackage{etoolbox}
+                \AtBeginEnvironment{longtable}{\footnotesize}
+                \AtBeginEnvironment{tabular}{\footnotesize}
 ---
 
 ```{python}
 import polars as pl
 import numpy as np
 import seaborn as sns
+import matplotlib.pyplot as plt
 ```
 
 # Replication
@@ -20,8 +26,39 @@ Recently, Dekker Luberti and Stam examined whether peer-led supplimental instruc
 ## Experiment Design 
 
 1. Write a short paragraph that describes the core manipulation employed by the authors. Why do they think that this manipulation might effect outcomes they are going to measure? 
+
+The authors randomly assigned 493 first-year university students to either a treatment group that was offered access to supplemental instruction (SI) sessions or a control group that did not have access during the study period. The SI sessions were peer-led study groups held weekly for seven weeks, where students could review course materials, discuss concepts, and work on exercises together. The authors expected SI to improve academic performance by providing additional opportunities for practice and collaborative learning. They also believed that interacting and working with peers could provide social support, help students build friendships, and feel more connected to their university community, potentially improving their mental well-being and sense of belonging.
+
+
 2. Write a few short paragraphs that describe the three outcome *concepts* the authors are intersted in, and then how they choose to measure those outcomes. Write a short paragraph that identifies other concepts that the authors *could have* be interested in, but did not. Then, critically evaluate (this doesn't mean your conclusions need to be negative about it; but rather that you're thinking critcally about it) whether the ways they authors have chosen to measure outcomes are likely to capture the concepts they are measuring. 
+
+
+1) The first outcome is academic performance, which refers to how well students learn and perform in their courses. The authors measured this using students' final course exam grades obtained from university records. 
+
+The second outcome is about well-being. Mental well-being refers to both how students feel emotionally and how well they function psychologically. The authors measured this using the Short Warwick-Edinburgh Mental Well-being Scale (S-WEMWBS), a seven-item questionnaire asking students about their experiences over the past two weeks, such as whether they felt relaxed or connected to others. Responses were recorded on a five-point scale.
+
+The third outcome is about sense of belonging. Sense of belonging refers to whether students feel accepted and included in their university community. The authors measured this using a self-report survey that assessed students' feelings of connectedness to their peers and the university community. The survey included items such as "I feel at home here" and "I try to show up to classes as least as possible."
+
+2) Other Concepts: 
+
+They could have examined students' social connectedness and academic self-efficacy. Since SI involves working and interacting with other students, it would be interesting to see whether participants developed new friendships or stronger peer relationships. This is slightly different from feeling a sense of belonging to the university as a whole. They could also explore how these social dynamics impact academic outcomes.
+
+3) Measurement Evaluation:
+
+Overall, I think the authors' measurements are reasonable, but they have some limitations. Exam grades provide an objective measure of academic performance, although they may not fully capture improvements in learning skills or long-term understanding. The S-WEMWBS is a well-validated tool for assessing well-being, and the self-report survey for sense of belonging captures students' subjective experiences effectively. SI primarily encourages interaction within small peer groups, while the belonging scale measures students' connection to the university more broadly. The belonging scale also had relatively low reliability (Cronbach's alpha = 0.65 at the post-test), which could make it harder to detect changes in students' sense of belonging.
+
 3. Write out the experiment design that the authors employ using the `R, N, X, O, Y` grammar from class. What are the relative strengths of this design, and what are the limitations of this  design? 
+
+The authors used a randomized controlled experiment with a treatment and a control group:
+
+Treatment: R - O - X - Y
+
+Control: R - O - N - Y
+
+One strength of this design is random assignment, which helps reduce selection bias and makes the treatment and control groups more comparable. Having a control group also allows the authors to estimate the causal effect of offering SI rather than simply comparing students who voluntarily attended with those who did not.
+
+One limitation is that participation in SI was voluntary, and 29% of students in the treatment group never attended a session. While the study can estimate the causal effect of offering SI, it cannot directly determine the effect of actually attending the sessions. Also, the intervention lasted only seven weeks, which might not be enough to observe changes in mental well-being or sense of belonging. Finally, since the participants came from one Dutch university, the findings may not generalize to students in different educational settings.
+
 
 # Randomization Inference 
 
@@ -41,6 +78,94 @@ In the published analysis, the authors adjust for "demographic covariates". In t
 df = pl.read_parquet("./data/processed/supplimental_instruction.parquet")
 ```
 
+## Checking the data before analyzing it
+
+The three outcomes are not measured on the same number of students, so it is worth looking at how much data each one actually has before running anything.
+
+```{python}
+summary = df.group_by("treatment").agg(
+    n=pl.len(),
+    grade_n=pl.col("grade").count(),
+    grade_mean=pl.col("grade").mean(),
+    wellbeing_n=pl.col("t1_wellbeing").count(),
+    wellbeing_mean=pl.col("t1_wellbeing").mean(),
+    belong_n=pl.col("t1_belong").count(),
+    belong_mean=pl.col("t1_belong").mean(),
+).sort("treatment")
+
+summary
+```
+
+The study randomly assigned 493 students, with 255 in the treatment group and 238 in the control group. In the provided dataset, final exam grades were available for 414 students, while 320 completed the follow-up surveys on well-being and sense of belonging.
+
+The missing data rates were fairly similar between the two groups. For grades, 17.2% of the control group and 14.9% of the treatment group had missing data. For the follow-up surveys, the rates were 37.8% and 32.5%, respectively. Although the missing rates are similar, we cannot completely rule out bias from missing outcomes. Also, since only about two-thirds of students completed the follow-up surveys, we should be cautious when interpreting the non-significant findings for well-being and belonging.
+
+## Randomization inference
+
+We use randomization inference to test whether offering supplemental instruction had an effect on students' outcomes. Under the sharp null hypothesis, SI has no effect on any student, so their outcomes would be the same whether they were assigned to treatment or control. so we can randomly shuffle the treatment labels many times and calculate the difference in group means each time. This gives us a distribution of differences we might see just by chance. We then can compare the actual difference to this distribution to get a two sided p-value. Since students were randomly assigned to treatment or control at the individual level, rather than by course group, we shuffle the treatment labels across students.
+
+```{python}
+rng = np.random.default_rng(241)
+
+def ate(y, d):
+    # Difference in means between treated and control units
+    return y[d == 1].mean() - y[d == 0].mean()
+
+def randomization_inference(outcome, sims=10_000):
+    #permute treatment labels under the sharp null of no effect for anyone
+    sub = df.select(["treatment", outcome]).drop_nulls()
+    d = sub["treatment"].to_numpy()
+    y = sub[outcome].to_numpy().astype(float)
+
+    observed = ate(y, d)
+    null_dist = np.array([ate(y, rng.permutation(d)) for _ in range(sims)])
+    p_value = (np.abs(null_dist) >= np.abs(observed)).mean()
+
+    return {
+        "outcome": outcome,
+        "n": len(y),
+        "ate": observed,
+        "p_value": p_value,
+        "null_dist": null_dist,
+    }
+
+outcomes = ["grade", "t1_wellbeing", "t1_belong"]
+results = [randomization_inference(outcome) for outcome in outcomes]
+
+pl.DataFrame([
+    {k: r[k] for k in ("outcome", "n", "ate", "p_value")} for r in results
+])
+```
+
+```{python}
+fig, axes = plt.subplots(1, 3, figsize=(13, 3.5))
+
+for ax, r in zip(axes, results):
+    sns.histplot(r["null_dist"], ax=ax, color="lightsteelblue", bins=40)
+    ax.axvline(r["ate"], color="firebrick")
+    ax.set_title(f"{r['outcome']}\nATE = {r['ate']:+.3f}, p = {r['p_value']:.3f}")
+    ax.set_xlabel("Difference in means under the sharp null")
+    ax.set_ylabel("")
+
+fig.tight_layout()
+plt.show()
+```
+
+In each plot the histogram is the sampling distribution of the difference in means generated by random assignment, and the red line is what we actually observed.
+
+### Finding 1: grades
+
+Students offered SI scored 0.32 points higher on the final exam (6.37 versus 6.05 on a 0–10 scale). This is consistent with the direction of the paper's finding, although our estimated difference is smaller than the reported effect of 0.45 points. Our randomization inference gives a p-value of 0.095, so we cannot reject the sharp null hypothesis at the 5% significance level. The original paper found a statistically significant effect using multilevel regression with demographic covariates, while our analysis uses randomization inference without these adjustments, as instructed. 
+
+### Findings 2 and 3: well-being and belonging
+
+For both outcomes, the observed differences are close to the center of the null distributions. The treatment group scored 0.05 points lower on well-being (p = 0.439) and 0.04 points higher on belonging (p = 0.585). Both differences are very small and not statistically significant, which is consistent with the findings in the paper.
+
+However, this does not necessarily mean that SI has no effect on well-being or belonging. Only 320 of the 493 students completed the follow-up surveys, so the smaller sample size makes it harder to detect small effects. We should therefore be cautious about interpreting these non-significant results as evidence of no effect.
+
+Since students were randomly assigned access to SI rather than required to attend, our estimates represent the intention-to-treat (ITT) effects. This is important because 29% of students offered SI never attended a session, so our results do not directly tell us the causal effect of actually participating.
+
+
 # Power Analysis 
 
 You are intersted in getting people together for a pizza night and you're trying to get off of social media. This leaves you with a conundrum -- how will you get people to join up? The School (don't worry if you're not at the School of Information, suppose that this applies to your department too) always sends an email with informaation that the event is happening, but we get a lot of emails and there might be additional ways to communicate about this event. After a good think, you arrive at two possibilites: 
@@ -58,4 +183,189 @@ Conduct a power analysis to answer the following questions:
 2. How should assignments to treatment be allocated if you are intersted in knowing whether a specific communication is effective compared to control? 
 3. How should assignments to treatment be allocated if you are interested in knowing whether message (1) or (2) is more effective? 
 
-Because you are being asked to conduct these three different analyses, it seems, *to me* like a good idea to write a function that will conduct a power analysis given inputs that capture assumptions about the world. In answering each of the questions above, produce a plot (or plots) that show participants on the x-axis, power on the y-axis, and possible effect sizes as a color feature for points/lines in the plot. 
+Because you are being asked to conduct these three different analyses, it seems, *to me* like a good idea to write a function that will conduct a power analysis given inputs that capture assumptions about the world. In answering each of the questions above, produce a plot (or plots) that show participants on the x-axis, power on the y-axis, and possible effect sizes as a color feature for points/lines in the plot.
+
+## Setting up the power analysis
+
+Turnout is binary, with baseline 40%, so a treated person turns out with probability 0.40 plus the effect size (an effect of 0.10 means turnout rises from 40% to 50%). To get power, we simulate the experiment many times under an assumed effect and record how often a two-sided test of the difference in proportions rejects at the 5% level.
+
+```{python}
+def power_sim(n_treat, n_control, effect, p_control=0.40, sims=4_000, z_crit=1.96, seed=241):
+    # Seed from the inputs, so a given set of assumptions always gives the same
+    # answer no matter which other cells have been run before this one
+    rng = np.random.default_rng([seed, n_treat, n_control, int(effect * 1000)])
+
+    # Share of each group that turns out, across many simulated experiments
+    mean_treat = rng.binomial(n_treat, p_control + effect, sims) / n_treat
+    mean_control = rng.binomial(n_control, p_control, sims) / n_control
+
+    se = np.sqrt(
+        mean_treat * (1 - mean_treat) / n_treat
+        + mean_control * (1 - mean_control) / n_control
+    )
+    z = (mean_treat - mean_control) / se
+
+    # Power is the share of simulated experiments where we reject the null
+    return (np.abs(z) > z_crit).mean()
+```
+
+## Question 1: is any supplemental communication effective?
+
+This question pools the two supplemental conditions: treated means getting either the Canvas announcement or a flyer, control means only the usual email. The first plot varies the total sample at an even split; the second holds the total at the 2,000-person maximum and varies how many of those are exposed to treatment, which is what the allocation question is really asking.
+
+```{python}
+effects = [0.05, 0.075, 0.10, 0.15]
+colors = sns.color_palette("viridis", len(effects))
+
+totals = range(200, 2001, 100)
+n_treated = range(100, 1901, 100)
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
+
+for effect, color in zip(effects, colors):
+    # left: total sample size, split evenly between pooled treatment and control
+    power_by_total = [power_sim(n // 2, n // 2, effect) for n in totals]
+    ax1.plot(totals, power_by_total, color=color, label=f"{effect:.3f}")
+
+    # right: total fixed at 2,000, varying how many are exposed to treatment
+    power_by_split = [power_sim(nt, 2000 - nt, effect) for nt in n_treated]
+    ax2.plot(n_treated, power_by_split, color=color, label=f"{effect:.3f}")
+
+for ax, title, xlabel in [
+    (ax1, "Total sample size (even split)", "Total participants"),
+    (ax2, "Allocation with 2,000 participants", "Participants assigned to supplemental communication"),
+    ]:
+    ax.axhline(0.80, color="gray", linestyle="--", linewidth=1)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Power")
+    ax.set_ylim(0, 1.05)
+    ax.legend(title="Effect size")
+
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+# Smallest treatment group that still reaches 80% power, given 2,000 people in total
+rows = []
+for effect in effects:
+    smallest = None
+    for nt in range(50, 1951, 10):
+        if power_sim(nt, 2000 - nt, effect) >= 0.80:
+            smallest = nt
+            break
+    rows.append({
+        "effect": effect,
+        "min_n_treated": smallest,
+        "n_control": None if smallest is None else 2000 - smallest,
+        "power_at_even_split": round(power_sim(1000, 1000, effect), 3),
+    })
+
+pl.DataFrame(rows)
+```
+
+Power generally increases with sample size and effect size. With a fixed sample of 2000 participants, power is highest when treatment and control are roughly evenly split. However, since we want to minimize the number of students receiving additional messages, an even split may not be necessary. For example, if the treatment increases turnout by 10 percentage points, only about 220 treated students are needed to reach 80% power, compared to 1000 under an even split.
+
+Since we do not know the actual effect size, I would choose a slightly more conservative allocation of 500 students to treatment (250 receiving Canvas announcements and 250 receiving flyers) and 1,500 to control. Based on the simulation, this would allow us to detect an increase of around 7.5 percentage points with at least 80% power, while still limiting the number of students receiving additional communication. However, if the true effect is only 5 percentage points, even using all 2000 students with an even split would not provide enough power to reliably detect it.
+
+## Question 2: is a specific communication effective?
+
+For example, Canvas vs. email only, with the flyer condition set aside. The other treatment condition no longer contributes to the test, so only the size of that one condition and of control matter. We still need to run both conditions in order to test each of them, so the allocation is k people in Canvas, k in flyers, and the remaining 2000 - 2k in control.
+
+```{python}
+per_condition = range(100, 901, 50)
+
+fig, ax = plt.subplots(figsize=(7, 4.5))
+
+for effect, color in zip(effects, colors):
+    power_by_condition = [power_sim(k, 2000 - 2 * k, effect) for k in per_condition]
+    ax.plot(per_condition, power_by_condition, color=color, label=f"{effect:.3f}")
+
+ax.axhline(0.80, color="gray", linestyle="--", linewidth=1)
+ax.set_title("One condition vs. control (both conditions run, 2,000 participants)")
+ax.set_xlabel("Participants per treatment condition")
+ax.set_ylabel("Power")
+ax.set_ylim(0, 1.05)
+ax.legend(title="Effect size")
+
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+# smallest per-condition size reaching 80% power, given 2,000 people in total
+rows = []
+for effect in effects:
+    smallest = next(
+        (k for k in range(50, 951, 10)
+         if power_sim(k, 2000 - 2 * k, effect) >= 0.80),
+        None,
+    )
+    rows.append({
+        "effect": effect,
+        "min_per_condition": smallest,
+        "total_exposed": None if smallest is None else 2 * smallest,
+        "n_control": None if smallest is None else 2000 - 2 * smallest,
+    })
+
+pl.DataFrame(rows)
+```
+
+Compared with Question 1, we need more participants receiving supplemental communication overall because we are now testing each treatment condition separately against the control group. Based on the simulation, detecting a 10 percentage point increase in turnout requires approximately 230 participants per condition to reach 80% power, meaning 460 students would receive additional communication in total. For a smaller effect of 7.5 percentage points, we would need around 580 participants per condition, while an effect of 5 percentage points cannot be detected with 80% power given the 2,000-person limit.
+
+
+Since we want to minimize the number of students receiving additional messages, I would assign around 250 students to Canvas, 250 to flyers, and the remaining 1,500 to control. This allocation provides at least 80% power to detect a 10 percentage point increase for each communication method, while keeping the number of students receiving additional messages relatively low. However, if the true effect is smaller, we would need a larger treatment group to detect it reliably.
+
+ 
+## Question 3: is Canvas or flyers more effective?
+
+For this question, we compare the two treatment conditions directly, so the control group is not included in the comparison. The effect size is now the difference in turnout between Canvas and flyers, rather than the difference between a treatment and control. For the simulation, I assume that the weaker communication method has a turnout rate of 50%, and the stronger method increases it by 5, 7.5, 10, or 15 percentage points. We then calculate the power for different sample sizes in each treatment condition.
+
+```{python}
+differences = [0.05, 0.075, 0.10, 0.15]
+
+fig, ax = plt.subplots(figsize=(7, 4.5))
+
+for difference, color in zip(differences, colors):
+    power_by_condition = [
+        power_sim(k, k, difference, p_control=0.50) for k in per_condition
+    ]
+    ax.plot(per_condition, power_by_condition, color=color, label=f"{difference:.3f}")
+
+ax.axhline(0.80, color="gray", linestyle="--", linewidth=1)
+ax.set_title("Canvas vs. flyers (control not used in this test)")
+ax.set_xlabel("Participants per treatment condition")
+ax.set_ylabel("Power")
+ax.set_ylim(0, 1.05)
+ax.legend(title="Difference between messages")
+
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+# smallest per-condition size reaching 80% power for the head-to-head comparison
+rows = []
+for difference in differences:
+    smallest = next(
+        (k for k in range(50, 1001, 10) 
+         if power_sim(k, k, difference, p_control=0.50) >= 0.80), 
+         # here p_control=0.50 represents the weaker message, not the actual control group
+        None,
+    )
+    rows.append({
+        "difference": difference,
+        "min_per_condition": smallest,
+        "total_exposed": None if smallest is None else 2 * smallest,
+        "n_left_for_control": None if smallest is None else 2000 - 2 * smallest,
+    })
+
+pl.DataFrame(rows)
+```
+
+For this question, we compare Canvas and flyers directly, so the control group is not included in the comparison. The power analysis shows that larger differences between the two messages are easier to detect. Based on the simulation, detecting a 10 percentage point difference requires approximately 390 participants per condition to reach 80% power, while a 7.5 percentage point difference requires around 680 per condition. If the difference is only 5 percentage points, even assigning all 2,000 participants equally between Canvas and flyers would not provide 80% power.
+
+Unlike the previous questions, both groups in this comparison receive additional communication. To maximize power for the direct comparison, we would split participants equally between Canvas and flyers. However, this also means exposing more students to additional messages. If we still want to minimize exposure while keeping a control group for the other comparisons, I would assign around 400 participants to each treatment condition and leave 1,200 in control. This would give us approximately 80% power to detect a 10 percentage point difference while keeping the number of treated students relatively low. The trade-off is that smaller differences between the two methods would be harder to detect.
+
+
